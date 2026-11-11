@@ -1,0 +1,38 @@
+[package]
+name = "shorturl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dioxus = { version = "0.7.10", features = ["fullstack"] }
+serde = { version = "1", features = ["derive"] }
+
+# 아래는 서버 빌드(`server` 기능)에서만 쓰는 의존성입니다.
+# 브라우저용 wasm 번들에는 들어가지 않습니다.
+url = { version = "2.5", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+dotenvy = { version = "0.15", optional = true }
+anyhow = { version = "1", optional = true }
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "macros",
+    "migrate",
+], optional = true }
+
+[features]
+default = ["web"]
+# 브라우저(wasm) 쪽 빌드
+web = ["dioxus/web"]
+# 서버 쪽 빌드: DB 접속, URL 검증, 리디렉션 처리
+server = ["dioxus/server", "dep:url", "dep:tokio", "dep:dotenvy", "dep:anyhow", "dep:sqlx"]
+
+[profile.wasm-dev]
+inherits = "dev"
+opt-level = 1
+
+[profile.server-dev]
+inherits = "dev"
+
+[profile.android-dev]
+inherits = "dev"

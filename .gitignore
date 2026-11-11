@@ -1,0 +1,6 @@
+/target
+/dist
+.env
+
+# 클래스룸 문제 지문 (비공개 자료)
+docs/과제.md

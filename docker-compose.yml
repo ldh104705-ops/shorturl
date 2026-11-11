@@ -1,0 +1,19 @@
+# 로컬 개발용 PostgreSQL. 실행: docker compose up -d
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: shorturl
+      POSTGRES_PASSWORD: shorturl # 로컬 전용 값. 배포 환경에서는 쓰지 마세요.
+      POSTGRES_DB: shorturl
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shorturl"]
+      interval: 2s
+      retries: 15
+
+volumes:
+  pgdata:
