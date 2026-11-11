@@ -7,7 +7,8 @@ services:
       POSTGRES_PASSWORD: shorturl # 로컬 전용 값. 배포 환경에서는 쓰지 마세요.
       POSTGRES_DB: shorturl
     ports:
-      - "5432:5432"
+      # 127.0.0.1에만 열어서 같은 네트워크의 다른 기기는 접속할 수 없게 한다.
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
