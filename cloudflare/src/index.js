@@ -13,7 +13,7 @@
 //   WORKER_SECRET   (Cloudflare Secret)    백엔드와 공유하는 비밀 값. 설정 파일·코드에 넣지 않는다.
 //   CREATE_LIMITER  (ratelimits binding)   생성 요청 호출 제한
 
-import { backendTarget, classify } from "./routing.js";
+import { backendTarget, classify, readBodyLimited } from "./routing.js";
 
 /** 생성 요청 본문 최대 크기(바이트). URL 2048자 + JSON 여유분. */
 const MAX_BODY_BYTES = 8 * 1024;
@@ -64,10 +64,11 @@ export default {
     }
     headers.set("X-Worker-Secret", env.WORKER_SECRET);
 
+    // 본문은 스트림으로 읽으며 크기를 세고, 8KB를 넘는 순간 읽기를 멈춘다.
     let body;
     if (route === "create") {
-      body = await request.arrayBuffer();
-      if (body.byteLength > MAX_BODY_BYTES) {
+      body = await readBodyLimited(request, MAX_BODY_BYTES);
+      if (body === null) {
         return textResponse(413, "요청 본문이 너무 큽니다.");
       }
     }

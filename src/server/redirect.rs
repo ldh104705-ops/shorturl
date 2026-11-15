@@ -1,11 +1,31 @@
 //! `/숫자` 요청 처리: 원본 URL로 HTTP 302 리디렉션하거나 404 안내를 보여준다.
 
-use super::{db, validate::parse_code};
+use super::{auth::require_worker_secret, db, validate::parse_code};
 use dioxus::server::axum::{
     extract::Path,
     http::{header, StatusCode},
+    middleware::from_fn_with_state,
     response::{Html, IntoResponse, Response},
+    routing::get,
+    Router,
 };
+use std::sync::Arc;
+
+/// `/{code}` 라우터. 비밀 헤더 검사를 이 라우트에 직접(route_layer) 붙인다.
+/// 매칭된 요청은 경로 인코딩(`/%31` 등)과 상관없이 핸들러보다 먼저 검사된다.
+pub fn router(secret: Arc<str>) -> Router {
+    Router::new()
+        .route(
+            "/{code}",
+            // GET(과 HEAD)만 허용. 수정·삭제 메서드는 명시적으로 405로 거부한다.
+            get(follow)
+                .post(reject_change)
+                .put(reject_change)
+                .patch(reject_change)
+                .delete(reject_change),
+        )
+        .route_layer(from_fn_with_state(secret, require_worker_secret))
+}
 
 /// GET /{code}
 pub async fn follow(Path(code): Path<String>) -> Response {
@@ -56,4 +76,54 @@ fn not_found() -> Response {
         ),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dioxus::server::axum::{body::Body, extract::Request};
+    use tower::ServiceExt;
+
+    /// 실제 리디렉션 라우터: 비밀 헤더가 없거나 틀리면 핸들러(DB)에 닿기 전에 403.
+    #[tokio::test]
+    async fn redirect_router_rejects_without_secret() {
+        for path in ["/1", "/%31", "/%31%32", "/abc", "/0123"] {
+            for method in ["GET", "HEAD", "PUT", "DELETE"] {
+                for secret in [None, Some("wrong")] {
+                    let mut req = Request::builder().method(method).uri(path);
+                    if let Some(s) = secret {
+                        req = req.header("X-Worker-Secret", s);
+                    }
+                    let res = router(Arc::from("s3cret"))
+                        .oneshot(req.body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        res.status(),
+                        StatusCode::FORBIDDEN,
+                        "{method} {path} {secret:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 비밀이 맞으면 핸들러까지 간다. (DB가 필요 없는 경로로 확인: 숫자가 아니면 404, 변경은 405)
+    #[tokio::test]
+    async fn redirect_router_passes_with_secret() {
+        for (method, path, expected) in [
+            ("GET", "/abc", StatusCode::NOT_FOUND),
+            ("GET", "/0123", StatusCode::NOT_FOUND),
+            ("PUT", "/%31", StatusCode::METHOD_NOT_ALLOWED),
+        ] {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("X-Worker-Secret", "s3cret")
+                .body(Body::empty())
+                .unwrap();
+            let res = router(Arc::from("s3cret")).oneshot(req).await.unwrap();
+            assert_eq!(res.status(), expected, "{method} {path}");
+        }
+    }
 }

@@ -166,8 +166,10 @@ DB 비밀번호 등 실제 값은 Railway 환경변수에만 넣고, 저장소·
   Cloudflare 위치별 근사치라 정확히 20회에서 끊기지 않을 수 있습니다.
 - **본문 크기**: 생성 요청 본문이 8KB를 넘으면 413.
 
-**백엔드 쪽 확인** (`src/server/auth.rs`): `/api/*`와 `/{숫자}` 요청은 `X-Worker-Secret`이 `WORKER_SECRET`과 같아야 하고(상수 시간 비교),
+**백엔드 쪽 확인** (`src/server/auth.rs`): 생성 API와 `/{code}` 라우트는 `X-Worker-Secret`이 `WORKER_SECRET`과 같아야 하고(상수 시간 비교),
 다르거나 없으면 403입니다. 그래서 Railway 주소로 직접 호출하면 막힙니다.
+검사는 경로 문자열 모양으로 판단하지 않고 라우트 자체에 붙어 있습니다
+(`/{code}`는 `route_layer`, `/api/links`는 서버 함수 본문 맨 앞). `/%31`처럼 인코딩된 경로도 똑같이 검사됩니다.
 
 Railway 주소는 코드가 아니라 `wrangler.jsonc`의 `vars.BACKEND_URL`에 둡니다.
 

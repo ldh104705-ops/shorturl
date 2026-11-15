@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import worker from "../src/index.js";
-import { backendTarget, classify } from "../src/routing.js";
+import { backendTarget, classify, readBodyLimited } from "../src/routing.js";
 
 const BACKEND = "https://backend.example";
 const SECRET = "test-secret-value";
@@ -54,7 +54,12 @@ describe("classify: 허용 목록", () => {
     ["GET", "/abc", null],
     ["GET", "/12a", null],
     ["GET", "/1/2", null],
-    ["GET", "/1234567890123456789", null], // 19자리: i64 범위 밖
+    ["GET", "/1234567890123456789", "redirect"], // 19자리지만 i64 범위 안
+    ["GET", "/9223372036854775807", "redirect"], // i64 최댓값
+    ["GET", "/9223372036854775808", null], // i64 최댓값 + 1
+    ["GET", "/9999999999999999999", null], // 19자리, i64 범위 밖
+    ["GET", "/12345678901234567890", null], // 20자리
+    ["GET", "/%31", null], // 인코딩된 숫자는 받지 않는다
     ["GET", "/api/other", null],
     ["GET", "//attacker.example/collect", null],
   ];
@@ -157,4 +162,63 @@ describe("fetch 핸들러", () => {
     assert.equal(res.status, 413);
     assert.equal(calls.length, 0);
   });
+
+  it("Content-Length 없는 스트림 본문도 8KB를 넘는 순간 읽기를 멈추고 413", async () => {
+    const s = chunkedStream(4096, 100); // 4KB씩 최대 100번(400KB)까지 내보낼 수 있는 스트림
+    const request = req("/api/links", { method: "POST", body: s.stream, duplex: "half" });
+    assert.equal(request.headers.get("content-length"), null);
+
+    const res = await worker.fetch(request, env());
+    assert.equal(res.status, 413);
+    assert.equal(calls.length, 0);
+    assert.equal(s.cancelled, true, "reader.cancel()이 호출되어야 한다");
+    assert.ok(s.pulled <= 4, `8KB를 넘은 직후 멈춰야 한다 (읽은 조각 수: ${s.pulled})`);
+  });
+
+  it("Content-Length 없는 스트림 본문이 8KB 이하면 그대로 전달", async () => {
+    const s = chunkedStream(4096, 2); // 정확히 8KB
+    const res = await worker.fetch(
+      req("/api/links", { method: "POST", body: s.stream, duplex: "half" }),
+      env(),
+    );
+    assert.equal(res.status, 200);
+    assert.equal(calls[0].init.body.byteLength, 8192);
+  });
 });
+
+describe("readBodyLimited", () => {
+  it("한도 이하면 모든 조각을 이어 붙인다", async () => {
+    const s = chunkedStream(3, 3);
+    const body = await readBodyLimited(new Request("https://x.example", { method: "POST", body: s.stream, duplex: "half" }), 9);
+    assert.deepEqual([...body], [0, 0, 0, 1, 1, 1, 2, 2, 2]);
+  });
+  it("한도를 1바이트라도 넘으면 null", async () => {
+    const s = chunkedStream(5, 2);
+    const body = await readBodyLimited(new Request("https://x.example", { method: "POST", body: s.stream, duplex: "half" }), 9);
+    assert.equal(body, null);
+    assert.equal(s.cancelled, true);
+  });
+  it("본문이 없으면 빈 배열", async () => {
+    const body = await readBodyLimited(new Request("https://x.example", { method: "POST" }), 9);
+    assert.equal(body.byteLength, 0);
+  });
+});
+
+/** chunkSize 바이트 조각을 최대 count개 내보내는 스트림. 읽힌 조각 수와 cancel 여부를 기록한다. */
+function chunkedStream(chunkSize, count) {
+  const state = { pulled: 0, cancelled: false };
+  state.stream = new ReadableStream({
+    pull(controller) {
+      if (state.pulled >= count) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(new Uint8Array(chunkSize).fill(state.pulled % 256));
+      state.pulled += 1;
+    },
+    cancel() {
+      state.cancelled = true;
+    },
+  });
+  return state;
+}

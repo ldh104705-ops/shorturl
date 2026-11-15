@@ -41,10 +41,17 @@ fn http_error(code: u16, message: &str) -> ServerFnError {
 /// 원본 URL을 받아 숫자형 단축 주소를 만든다. 로그인 없이 누구나 호출할 수 있다.
 ///
 /// 요청 예: `POST /api/links` 본문 `{"url": "https://example.org"}`
+///
+/// `headers: HeaderMap`은 서버에서만 보이는 axum 추출기다. Worker의 비밀 헤더를 확인하는 데 쓴다.
 #[cfg(feature = "fullstack")]
-#[post("/api/links")]
+#[post("/api/links", headers: dioxus::fullstack::HeaderMap)]
 pub async fn create_link(url: String) -> Result<CreatedLink, ServerFnError> {
-    use crate::server::{db, validate};
+    use crate::server::{auth, db, validate};
+
+    // 0) Worker를 거친 요청인지 확인한다. 이 함수(라우트) 안에서 검사하므로 경로 표기와 상관없다.
+    if !auth::request_is_from_worker(&headers) {
+        return Err(http_error(403, "Forbidden"));
+    }
 
     // 1) 서버에서 다시 검증한다. 브라우저 검증은 우회할 수 있으므로 믿지 않는다.
     //    `?`는 "에러면 여기서 바로 반환"이라는 뜻이다. → 400 Bad Request
