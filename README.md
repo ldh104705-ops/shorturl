@@ -2,22 +2,20 @@
 
 ## 배포 URL
 
-배포 예정
-
-- 서비스 URL: (배포 예정)
-- 테스트 단축 URL: (배포 예정)
-- 테스트 원본 URL: (배포 예정)
+- 서비스 URL: (배포 후 기입)
+- 테스트 단축 URL: (배포 후 기입)
+- 테스트 원본 URL: (배포 후 기입)
 
 ## 소개
 
-긴 URL을 넣으면 `http://localhost:8080/123`처럼 **숫자로만 된** 단축 주소를 만들어 주는 서비스입니다.
+긴 URL을 넣으면 `https://도메인/123`처럼 **숫자로만 된** 단축 주소를 만들어 주는 서비스입니다.
 화면과 서버를 모두 [Dioxus](https://dioxuslabs.com) 0.7 풀스택(Rust)으로 구현했고, 데이터는 PostgreSQL에 저장합니다.
 
 - 회원가입·로그인 없이 누구나 생성할 수 있습니다.
 - 한 번 발급한 번호와 원본 URL의 연결은 바꿀 수 없습니다(수정·삭제·만료 없음).
 - `/숫자`로 접속하면 서버가 HTTP 302 리디렉션으로 원본 URL로 보냅니다.
 
-## 프로젝트 구조
+### 프로젝트 구조
 
 ```
 src/
@@ -30,6 +28,7 @@ src/
     redirect.rs        GET /{code} → 302, 없으면 404, 변경 메서드는 405
 migrations/
   0001_create_links.sql  테이블·제약·불변 트리거
+Dockerfile             Railway 배포용 멀티 스테이지 이미지
 docker-compose.yml     로컬 PostgreSQL
 .env.example           환경변수 예시
 ```
@@ -56,7 +55,7 @@ docker-compose.yml     로컬 PostgreSQL
 docker compose up -d
 ```
 
-`postgres:17` 컨테이너가 `localhost:5432`에 뜹니다(사용자·비밀번호·DB 이름 모두 `shorturl`, 로컬 전용 값).
+`postgres:17` 컨테이너가 `127.0.0.1:5432`에 뜹니다(사용자·비밀번호·DB 이름 모두 `shorturl`, 로컬 전용 값).
 데이터는 Docker 볼륨 `pgdata`에 저장되므로 컨테이너나 서버를 재시작해도 유지됩니다.
 
 테이블은 **서버가 시작할 때 자동으로** 만들어집니다(`sqlx::migrate!`가 `migrations/`의 SQL을 한 번만 적용).
@@ -71,8 +70,9 @@ cp .env.example .env
 | 이름 | 설명 | 로컬 기본값 |
 | --- | --- | --- |
 | `DATABASE_URL` | PostgreSQL 접속 주소 (필수) | `postgres://shorturl:shorturl@localhost:5432/shorturl` |
-| `PUBLIC_BASE_URL` | 화면에 표시할 단축 주소 앞부분 | `http://localhost:8080` |
-| `IP`, `PORT` | 서버 바인딩 주소 (Dioxus가 읽음, 선택) | dx 기본값 |
+| `PUBLIC_BASE_URL` | 화면에 표시할 단축 주소 앞부분 (끝에 `/` 없이) | `http://localhost:8080` |
+| `IP` | 서버가 바인딩할 주소 (Dioxus가 읽음) | `127.0.0.1` (Docker 이미지는 `0.0.0.0`) |
+| `PORT` | 서버가 들을 포트 (Dioxus가 읽음) | `8080` |
 
 `.env`는 `.gitignore`에 들어 있어 커밋되지 않습니다.
 
@@ -92,7 +92,42 @@ cargo test --features server --no-default-features
 
 URL 검증과 번호 파싱 규칙을 단위 테스트합니다.
 
-## 동작 방식
+## 배포 방법과 라우팅 구성
+
+### 구성
+
+| 역할 | 서비스 |
+| --- | --- |
+| 웹 화면·공개 접점 | Cloudflare |
+| Rust 백엔드·생성 API·리디렉션 처리 | Railway (이 저장소의 `Dockerfile`) |
+| 영구 DB | Railway PostgreSQL |
+
+Dioxus 풀스택 서버 하나가 화면(`/`, 정적 파일), 생성 API(`/api/links`), 리디렉션(`/{숫자}`)을 모두 처리합니다.
+
+### Railway (백엔드 + DB)
+
+1. Railway 프로젝트에 **PostgreSQL**을 추가합니다.
+2. 같은 프로젝트에 이 GitHub 저장소로 서비스를 추가합니다. 저장소 루트의 `Dockerfile`로 빌드됩니다.
+   - 빌드 단계: Rust + `wasm32-unknown-unknown` + `dx` 0.7.10으로 `dx bundle --platform web --fullstack --release`
+   - 실행 단계: `debian:trixie-slim`에 서버 실행 파일과 `public/` 폴더만 복사
+3. 서비스 환경변수를 설정합니다.
+
+   | 이름 | 값 |
+   | --- | --- |
+   | `DATABASE_URL` | Railway PostgreSQL 변수 참조 (`${{Postgres.DATABASE_URL}}`) |
+   | `PUBLIC_BASE_URL` | 공개 주소 (예: `https://도메인`) |
+
+   `IP=0.0.0.0`은 이미지에 들어 있고, `PORT`는 Railway가 자동으로 넣어 줍니다(지정하지 않으면 8080).
+4. 배포되면 서버가 시작하면서 마이그레이션을 적용합니다.
+
+DB 비밀번호 등 실제 값은 Railway 환경변수에만 넣고, 저장소·이미지에는 포함하지 않습니다.
+
+### Cloudflare (공개 접점)
+
+Cloudflare 구성은 아직 진행 중입니다. 공개 도메인의 `/`, `/api/*`, `/{숫자}` 요청이 모두 Railway 서비스로 전달되도록 라우팅해,
+제출한 공개 주소에서도 `/숫자`가 서버의 302 리디렉션으로 동작하게 할 예정입니다. 구성이 끝나면 이 절에 설정 파일과 방법을 적습니다.
+
+## 숫자 발급 방식, 중복 방지, 생성 후 불변
 
 ### 요청 흐름
 
@@ -125,7 +160,7 @@ id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY
 ```
 
 - IDENTITY 시퀀스는 DB 안에서 원자적으로 값을 늘리므로, 요청이 동시에 와도 두 요청이 같은 번호를 받지 않습니다.
-- 번호는 1부터 늘어나지만 **연속을 보장하지 않습니다.** 같은 URL을 다시 요청해 `ON CONFLICT`로 끝난 INSERT도 시퀀스 값을 하나 쓰기 때문에 중간 번호가 비어 있을 수 있습니다. (과제에서 연속성은 요구하지 않음)
+- 번호는 1부터 늘어나지만 **연속을 보장하지 않습니다.** 같은 URL을 다시 요청해 `ON CONFLICT`로 끝난 INSERT도 시퀀스 값을 하나 쓰기 때문에 중간 번호가 비어 있을 수 있습니다.
 - 주소 경로는 `0`으로 시작하지 않는 양의 정수만 받습니다(`/0123` → 404). 한 번호에 주소가 하나만 대응하게 하기 위해서입니다.
 
 ### 같은 URL을 다시 입력하면
@@ -150,7 +185,7 @@ RETURNING id;
 | 같은 URL이 여러 행으로 저장 | `original_url`에 `UNIQUE` 제약 + `ON CONFLICT DO NOTHING` |
 | 같은 URL 동시 요청 | UNIQUE 제약이 한 건만 통과시키고, 나머지는 기존 행의 번호를 조회 |
 
-### 생성 후 불변 설계
+### 생성 후 불변
 
 여러 겹으로 막습니다. 화면에서 버튼을 숨기는 것만으로 끝내지 않습니다.
 
@@ -160,24 +195,27 @@ RETURNING id;
 4. **DB 트리거**: `links` 테이블에 `BEFORE UPDATE OR DELETE`, `BEFORE TRUNCATE` 트리거가 있어서, 코드 버그나 DB 직접 접속으로도 기존 행을 바꿀 수 없습니다.
 5. **번호 재사용 없음**: 행을 지울 수 없고 IDENTITY 시퀀스는 되돌아가지 않으므로, 한 번 쓴 번호가 다른 URL에 다시 배정되지 않습니다.
 
-## 확인 시나리오와 결과 (로컬)
+## 확인 시나리오 결과와 재현 방법
 
-아래는 로컬(`dx serve` + Docker PostgreSQL)에서 확인한 결과입니다.
+### 결과 (로컬)
+
+로컬(`dx serve` 개발·`--release` 빌드 + Docker PostgreSQL)에서 확인한 결과입니다. 배포 환경 결과는 배포 후 추가합니다.
 
 | 시나리오 | 결과 |
 | --- | --- |
-| `https://example.org/a/b?x=1&y=2#frag` 생성 | `200`, `id: 1` |
-| 같은 URL 다시 생성 | 같은 `id: 1` 반환 |
-| 서로 다른 URL 20개 동시 생성 | 20개 모두 서로 다른 번호 |
-| `GET /1` | `302`, `Location: https://example.org/a/b?x=1&y=2#frag` (경로·쿼리·프래그먼트 유지) |
-| `example.org`, `ftp://x.org`, `javascript:alert(1)`, 빈 값 | `400` + 안내 문구 |
+| 시크릿 창에서 URL 입력 → 생성 → 복사 | 로그인 없이 `/숫자` 주소 생성, 복사 동작 |
+| 생성한 주소를 다른 브라우저에서 열기 | 원본 URL로 이동, `?x=1#top` 유지 |
+| 같은 URL 다시 생성 | 같은 번호 반환 |
+| 서로 다른 URL 20개 동시 생성 | 20개 모두 서로 다른 번호, DB의 전체 행 수 = 서로 다른 번호 수 |
+| `GET /{번호}` | `302`, `Location`에 원본 URL(경로·쿼리·프래그먼트 유지) |
+| `ftp://x.org`, `javascript:alert(1)`, 빈 값 | `400` + 안내 문구 |
 | `GET /999999`, `/0123`, `/abc` | `404` 안내 페이지 |
-| `PUT`·`PATCH`·`DELETE`·`POST /1` | `405`, 이후에도 `/1`은 원래 URL로 이동 |
+| `PUT`·`PATCH`·`DELETE`·`POST /{번호}` | `405`, 이후에도 원래 URL로 이동 |
 | DB에서 직접 `UPDATE`·`DELETE` | 트리거가 오류로 거부 |
 | DB에서 직접 `id`를 지정해 `INSERT` | `GENERATED ALWAYS`로 거부 |
-| 서버 재시작 후 `GET /1` | 같은 원본 URL로 이동 |
+| 서버 재시작, DB 재시작 후 `GET /{번호}` | 같은 원본 URL로 이동 |
 
-### 직접 재현하기
+### 재현 방법
 
 ```bash
 # 생성
@@ -197,6 +235,10 @@ curl -si http://localhost:8080/999999 | head -n 1
 
 # 변경 시도 → 405
 curl -si -X PUT http://localhost:8080/1 -d 'https://evil.example' | head -n 1
+
+# 동시 생성 20개 → id가 모두 달라야 함
+for i in $(seq 1 20); do curl -s -X POST http://localhost:8080/api/links \
+  -H "content-type: application/json" -d "{\"url\":\"https://example.com/c$i\"}" & done; wait
 
 # DB 직접 변경 시도 → 트리거 오류
 docker compose exec db psql -U shorturl -c "UPDATE links SET original_url='x' WHERE id=1;"

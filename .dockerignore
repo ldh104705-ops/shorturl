@@ -1,0 +1,10 @@
+target
+dist
+.env
+.git
+docs
+*.md
+!README.md
+docker-compose.yml
+Dockerfile
+.dockerignore
