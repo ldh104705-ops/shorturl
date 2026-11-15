@@ -1,6 +1,6 @@
 //! 화면(UI). 브라우저에서 wasm으로 실행됩니다.
 
-use crate::api::{create_link, CreatedLink};
+use crate::api::{request_link, CreatedLink};
 use dioxus::prelude::*;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
@@ -34,22 +34,17 @@ pub fn App() -> Element {
     // 복사 상태: None = 아직 안 누름, Some(true) = 성공, Some(false) = 실패
     let mut copied = use_signal(|| None::<bool>);
 
-    // 생성 버튼: 서버 함수 create_link를 호출 (실제로는 POST /api/links 요청)
+    // 생성 버튼: POST /api/links 요청 (api.rs의 request_link)
     let on_submit = move |evt: FormEvent| async move {
         evt.prevent_default();
         busy.set(true);
         error.set(None);
         copied.set(None);
-        match create_link(input()).await {
+        match request_link(input()).await {
             Ok(link) => result.set(Some(link)),
-            Err(err) => {
+            Err(msg) => {
                 result.set(None);
-                // 서버가 보낸 안내 문구만 꺼내서 보여준다.
-                let msg = match err {
-                    ServerFnError::ServerError { message, .. } => message,
-                    other => other.to_string(),
-                };
-                error.set(Some(msg));
+                error.set(Some(msg)); // 서버가 보낸 안내 문구
             }
         }
         busy.set(false);

@@ -3265,6 +3265,7 @@ dependencies = [
  "dioxus",
  "dotenvy",
  "serde",
+ "serde_json",
  "sqlx",
  "tokio",
  "url",

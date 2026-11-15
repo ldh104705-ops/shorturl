@@ -1,10 +1,19 @@
 //! 화면과 서버가 함께 쓰는 API.
 //!
-//! `#[post(...)]`를 붙인 함수는 "서버 함수"입니다. 함수 본문은 서버에서만 실행되고,
-//! 브라우저에서 이 함수를 부르면 Dioxus가 자동으로 `POST /api/links` HTTP 요청으로 바꿔 줍니다.
+//! - 풀스택 빌드(`fullstack` 기능, dx serve·Railway): `#[post(...)]`를 붙인 `create_link`는 "서버 함수"입니다.
+//!   함수 본문은 서버에서만 실행되고, 브라우저에서 부르면 Dioxus가 `POST /api/links` 요청으로 바꿔 줍니다.
+//! - 클라이언트 전용 빌드(`spa` 기능, Cloudflare 정적 파일): 서버 함수가 없으므로
+//!   같은 `POST /api/links` 요청을 직접 보냅니다. 요청·응답 형식은 서버 함수와 같습니다.
+//!
+//! 화면(app.rs)은 어느 빌드든 `request_link`만 부릅니다.
 
-use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
+
+#[cfg(all(feature = "spa", feature = "fullstack"))]
+compile_error!("`spa`는 `fullstack`·`server`와 함께 켤 수 없습니다. `--no-default-features --features spa`로 빌드하세요.");
+
+#[cfg(not(any(feature = "spa", feature = "fullstack")))]
+compile_error!("`fullstack`(기본값) 또는 `spa` 기능 중 하나를 켜야 합니다.");
 
 /// 생성 결과. 서버 → 브라우저로 JSON으로 전달됩니다.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -13,6 +22,11 @@ pub struct CreatedLink {
     pub short_url: String,
     pub original_url: String,
 }
+
+// ───────────── 풀스택 빌드: 서버 함수 ─────────────
+
+#[cfg(feature = "fullstack")]
+use dioxus::prelude::*;
 
 /// 상태 코드와 사용자에게 보여줄 메시지를 담은 에러를 만든다.
 #[cfg(feature = "server")]
@@ -27,6 +41,7 @@ fn http_error(code: u16, message: &str) -> ServerFnError {
 /// 원본 URL을 받아 숫자형 단축 주소를 만든다. 로그인 없이 누구나 호출할 수 있다.
 ///
 /// 요청 예: `POST /api/links` 본문 `{"url": "https://example.org"}`
+#[cfg(feature = "fullstack")]
 #[post("/api/links")]
 pub async fn create_link(url: String) -> Result<CreatedLink, ServerFnError> {
     use crate::server::{db, validate};
@@ -46,4 +61,74 @@ pub async fn create_link(url: String) -> Result<CreatedLink, ServerFnError> {
         short_url: format!("{}/{id}", db::public_base_url()),
         original_url,
     })
+}
+
+/// 화면에서 부르는 함수. 실패하면 사용자에게 보여줄 문구를 돌려준다.
+#[cfg(feature = "fullstack")]
+pub async fn request_link(url: String) -> Result<CreatedLink, String> {
+    create_link(url).await.map_err(|err| match err {
+        ServerFnError::ServerError { message, .. } => message,
+        other => other.to_string(),
+    })
+}
+
+// ───────────── 클라이언트 전용 빌드: 직접 HTTP 요청 ─────────────
+
+/// 같은 출처(현재 페이지 주소)의 `/api/links`로 POST한다. Cloudflare Worker가 Railway로 전달한다.
+#[cfg(not(feature = "fullstack"))]
+const CREATE_JS: &str = r#"
+const url = await dioxus.recv();
+try {
+  const res = await fetch("/api/links", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+  let body = null;
+  try { body = await res.json(); } catch (_) {}
+  return { ok: res.ok, status: res.status, body };
+} catch (_) {
+  return { ok: false, status: 0, body: null };
+}
+"#;
+
+#[cfg(not(feature = "fullstack"))]
+pub async fn request_link(url: String) -> Result<CreatedLink, String> {
+    use dioxus::prelude::document;
+    use serde_json::Value;
+
+    #[derive(Deserialize)]
+    struct FetchResult {
+        ok: bool,
+        status: u16,
+        body: Option<Value>,
+    }
+
+    let js = document::eval(CREATE_JS);
+    js.send(url)
+        .map_err(|_| "요청을 보내지 못했습니다.".to_string())?;
+    let raw = js
+        .await
+        .map_err(|_| "서버에 연결하지 못했습니다.".to_string())?;
+    let res: FetchResult =
+        serde_json::from_value(raw).map_err(|_| "응답을 해석하지 못했습니다.".to_string())?;
+
+    if res.ok {
+        return res
+            .body
+            .and_then(|b| serde_json::from_value(b).ok())
+            .ok_or_else(|| "응답을 해석하지 못했습니다.".to_string());
+    }
+
+    // 서버 함수의 에러 응답: {"message": "...", "code": 400, "data": {"ServerError": {"message": "..."}}}
+    let message = res.body.as_ref().and_then(|b| {
+        b.pointer("/data/ServerError/message")
+            .or_else(|| b.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    Err(message.unwrap_or_else(|| match res.status {
+        0 => "서버에 연결하지 못했습니다.".to_string(),
+        code => format!("요청이 실패했습니다. (HTTP {code})"),
+    }))
 }

@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-dioxus = { version = "0.7.10", features = ["fullstack"] }
+dioxus = { version = "0.7.10" }
 serde = { version = "1", features = ["derive"] }
+
+# 클라이언트 전용(spa) 빌드에서 API 응답을 해석할 때 쓴다.
+serde_json = { version = "1", optional = true }
 
 # 아래는 서버 빌드(`server` 기능)에서만 쓰는 의존성입니다.
 # 브라우저용 wasm 번들에는 들어가지 않습니다.
@@ -21,11 +24,24 @@ sqlx = { version = "0.8.6", default-features = false, features = [
 ], optional = true }
 
 [features]
-default = ["web"]
-# 브라우저(wasm) 쪽 빌드
+default = ["web", "fullstack"]
+# 브라우저(wasm) 렌더러. dx가 웹 빌드에 자동으로 켠다.
 web = ["dioxus/web"]
-# 서버 쪽 빌드: DB 접속, URL 검증, 리디렉션 처리
-server = ["dioxus/server", "dep:url", "dep:tokio", "dep:dotenvy", "dep:anyhow", "dep:sqlx"]
+# 풀스택 모드: 서버 함수 + SSR/하이드레이션. (dx serve, Railway)
+fullstack = ["dioxus/fullstack"]
+# 서버 빌드: 화면 SSR, 서버 함수 API, DB 접속, URL 검증, 리디렉션 처리 (Railway)
+server = [
+    "dioxus/server",
+    "fullstack",
+    "dep:url",
+    "dep:tokio",
+    "dep:dotenvy",
+    "dep:anyhow",
+    "dep:sqlx",
+]
+# 클라이언트 전용 브라우저 빌드: 하이드레이션 없이 빈 index.html에서 바로 그린다.
+# Cloudflare Workers 정적 파일용. API는 같은 출처의 /api/links로 직접 호출한다.
+spa = ["web", "dep:serde_json"]
 
 [profile.wasm-dev]
 inherits = "dev"

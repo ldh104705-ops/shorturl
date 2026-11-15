@@ -29,6 +29,10 @@ src/
 migrations/
   0001_create_links.sql  테이블·제약·불변 트리거
 Dockerfile             Railway 배포용 멀티 스테이지 이미지
+cloudflare/            Cloudflare Worker (공개 주소, 정적 화면, Railway 프록시)
+  wrangler.jsonc       Worker 설정 (정적 파일, BACKEND_URL)
+  src/index.js         정적 파일에 없는 요청을 Railway로 전달
+  scripts/build-web.mjs  웹 화면 정적 파일(spa 빌드) 생성
 docker-compose.yml     로컬 PostgreSQL
 .env.example           환경변수 예시
 ```
@@ -98,11 +102,12 @@ URL 검증과 번호 파싱 규칙을 단위 테스트합니다.
 
 | 역할 | 서비스 |
 | --- | --- |
-| 웹 화면·공개 접점 | Cloudflare |
+| 웹 화면·공개 접점 | Cloudflare Workers (`cloudflare/`) |
 | Rust 백엔드·생성 API·리디렉션 처리 | Railway (이 저장소의 `Dockerfile`) |
 | 영구 DB | Railway PostgreSQL |
 
-Dioxus 풀스택 서버 하나가 화면(`/`, 정적 파일), 생성 API(`/api/links`), 리디렉션(`/{숫자}`)을 모두 처리합니다.
+브라우저는 Cloudflare 주소로만 접속합니다. 화면 파일은 Cloudflare가 직접 내려주고,
+생성 API(`/api/links`)와 리디렉션(`/{숫자}`)은 Worker가 Railway의 Dioxus 서버로 전달합니다.
 
 ### Railway (백엔드 + DB)
 
@@ -122,10 +127,50 @@ Dioxus 풀스택 서버 하나가 화면(`/`, 정적 파일), 생성 API(`/api/l
 
 DB 비밀번호 등 실제 값은 Railway 환경변수에만 넣고, 저장소·이미지에는 포함하지 않습니다.
 
-### Cloudflare (공개 접점)
+### Cloudflare Workers (웹 화면 + 공개 주소)
 
-Cloudflare 구성은 아직 진행 중입니다. 공개 도메인의 `/`, `/api/*`, `/{숫자}` 요청이 모두 Railway 서비스로 전달되도록 라우팅해,
-제출한 공개 주소에서도 `/숫자`가 서버의 302 리디렉션으로 동작하게 할 예정입니다. 구성이 끝나면 이 절에 설정 파일과 방법을 적습니다.
+`cloudflare/` 폴더의 Worker가 공개 주소입니다. 설정은 `cloudflare/wrangler.jsonc`, 코드는 `cloudflare/src/index.js`입니다.
+
+| 요청 | 처리 |
+| --- | --- |
+| `/`, `/assets/*` (index.html, wasm, js, css) | **Workers Static Assets**가 `cloudflare/public/`에서 직접 응답 |
+| `/api/*` | Worker가 Railway로 전달 (메서드·헤더·본문 유지) |
+| `/{숫자}` | Worker가 Railway로 전달, `redirect: "manual"`로 302와 `Location`을 그대로 브라우저에 반환 |
+| 그 밖의 경로 (`/abc` 등) | Railway로 전달해 기존 404 안내 페이지 사용 |
+
+정적 파일에 있는 경로는 Cloudflare가 바로 응답하고, 없는 경로만 Worker 코드가 실행됩니다.
+Railway 주소는 코드가 아니라 `wrangler.jsonc`의 `vars.BACKEND_URL`에 둡니다.
+
+**웹 화면 빌드 방식**: 풀스택 브라우저 빌드는 서버가 SSR한 HTML을 하이드레이션하도록 되어 있어서,
+빈 `index.html`만 정적으로 제공하면 화면이 그려지지 않습니다. 그래서 Cloudflare용으로는
+**클라이언트 전용 빌드(`spa` 기능)**를 씁니다. 이 빌드는 하이드레이션 없이 바로 그리고,
+생성 요청을 같은 출처의 `POST /api/links`로 보냅니다(서버 함수와 같은 요청·응답 형식).
+
+| Cargo 기능 | 용도 |
+| --- | --- |
+| `web` + `fullstack` (기본값) | `dx serve` 개발, Railway 이미지의 브라우저 코드 |
+| `server` | Railway 서버 (SSR, `/api/links`, `/{숫자}`, DB) |
+| `spa` | Cloudflare 정적 파일 (`--no-default-features --features spa`) |
+
+### 배포 순서
+
+1. **Railway**: 위 절대로 백엔드와 DB를 배포하고, `PUBLIC_BASE_URL`을 공개 주소(Cloudflare 쪽 도메인)로 설정합니다.
+2. **웹 화면 정적 파일 빌드** (Rust·`dx` 필요):
+   ```bash
+   cd cloudflare
+   npm install
+   npm run build:web   # dx bundle --platform web --release --no-default-features --features spa → cloudflare/public/
+   ```
+3. **`wrangler.jsonc`의 `BACKEND_URL`**을 Railway 공개 주소로 맞춥니다.
+4. **로컬 확인(선택)**: `npm run dev` → <http://127.0.0.1:8787>
+5. **배포**:
+   ```bash
+   npx wrangler login
+   npm run deploy
+   ```
+   `https://shorturl.<계정>.workers.dev`로 배포됩니다. 커스텀 도메인은 Cloudflare 대시보드에서 이 Worker에 연결합니다.
+
+비밀 값은 필요하지 않습니다. `BACKEND_URL`은 공개 주소이고, DB 접속 정보는 Railway에만 있습니다.
 
 ## 숫자 발급 방식, 중복 방지, 생성 후 불변
 
