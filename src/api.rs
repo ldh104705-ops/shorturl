@@ -48,7 +48,8 @@ pub async fn create_link(url: String) -> Result<CreatedLink, ServerFnError> {
 
     // 1) 서버에서 다시 검증한다. 브라우저 검증은 우회할 수 있으므로 믿지 않는다.
     //    `?`는 "에러면 여기서 바로 반환"이라는 뜻이다. → 400 Bad Request
-    let original_url = validate::normalize_url(&url).map_err(|msg| http_error(400, msg))?;
+    let original_url = validate::normalize_url(&url, validate::self_hosts())
+        .map_err(|msg| http_error(400, msg))?;
 
     // 2) DB가 번호를 발급(또는 같은 URL의 기존 번호를 조회)한다.
     let id = db::insert_or_get(&original_url).await.map_err(|err| {

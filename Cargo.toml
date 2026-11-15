@@ -16,12 +16,17 @@ url = { version = "2.5", optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 dotenvy = { version = "0.15", optional = true }
 anyhow = { version = "1", optional = true }
+subtle = { version = "2.6", optional = true }
 sqlx = { version = "0.8.6", default-features = false, features = [
     "runtime-tokio",
     "postgres",
     "macros",
     "migrate",
 ], optional = true }
+
+[dev-dependencies]
+# 미들웨어 테스트에서 axum Router를 직접 호출(oneshot)할 때 쓴다.
+tower = { version = "0.5", features = ["util"] }
 
 [features]
 default = ["web", "fullstack"]
@@ -37,6 +42,7 @@ server = [
     "dep:tokio",
     "dep:dotenvy",
     "dep:anyhow",
+    "dep:subtle",
     "dep:sqlx",
 ]
 # 클라이언트 전용 브라우저 빌드: 하이드레이션 없이 빈 index.html에서 바로 그린다.

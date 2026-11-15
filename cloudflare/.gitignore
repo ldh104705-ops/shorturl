@@ -1,4 +1,10 @@
 node_modules/
 public/
 .wrangler/
+
+# 로컬 비밀 값 (wrangler dev가 읽음). 예시 파일만 올린다.
 .dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*

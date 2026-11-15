@@ -75,10 +75,12 @@ cp .env.example .env
 | --- | --- | --- |
 | `DATABASE_URL` | PostgreSQL 접속 주소 (필수) | `postgres://shorturl:shorturl@localhost:5432/shorturl` |
 | `PUBLIC_BASE_URL` | 화면에 표시할 단축 주소 앞부분 (끝에 `/` 없이) | `http://localhost:8080` |
+| `WORKER_SECRET` | Cloudflare Worker와 공유하는 비밀 값 (**필수**, 비면 서버가 시작되지 않음) | 직접 생성 (예: `openssl rand -hex 32`) |
+| `SELF_HOSTS` | 단축 대상에서 막을 자기 주소, 쉼표 구분 (선택) | 비워 둠 |
 | `IP` | 서버가 바인딩할 주소 (Dioxus가 읽음) | `127.0.0.1` (Docker 이미지는 `0.0.0.0`) |
 | `PORT` | 서버가 들을 포트 (Dioxus가 읽음) | `8080` |
 
-`.env`는 `.gitignore`에 들어 있어 커밋되지 않습니다.
+`.env`, `.env.*`는 `.gitignore`에 들어 있어 커밋되지 않습니다(`.env.example`만 커밋).
 
 ### 4. 실행
 
@@ -88,13 +90,23 @@ dx serve --platform web --fullstack
 
 브라우저에서 <http://localhost:8080> 을 엽니다. 첫 빌드는 몇 분 걸립니다.
 
+서버는 `/api/*`와 `/{숫자}` 요청에 Worker의 비밀 헤더를 요구하므로, 이 주소에서 바로 생성하면 403이 납니다.
+로컬에서 화면까지 확인하려면 Worker를 앞에 띄워서 <http://127.0.0.1:8787> 로 접속합니다.
+
+```bash
+cd cloudflare
+cp .dev.vars.example .dev.vars   # WORKER_SECRET에 .env와 같은 값, BACKEND_URL=http://127.0.0.1:8080
+npm install
+npm run build:web
+npm run dev
+```
+
 ### 5. 테스트
 
 ```bash
-cargo test --features server --no-default-features
+cargo test --features server --no-default-features   # URL 검증, 번호 파싱, 비밀 헤더 확인
+cd cloudflare && npm test                            # Worker 라우팅·헤더·호출 제한
 ```
-
-URL 검증과 번호 파싱 규칙을 단위 테스트합니다.
 
 ## 배포 방법과 라우팅 구성
 
@@ -121,8 +133,11 @@ URL 검증과 번호 파싱 규칙을 단위 테스트합니다.
    | --- | --- |
    | `DATABASE_URL` | Railway PostgreSQL 변수 참조 (`${{Postgres.DATABASE_URL}}`) |
    | `PUBLIC_BASE_URL` | 공개 주소 (예: `https://도메인`) |
+   | `WORKER_SECRET` | Worker와 같은 비밀 값 (필수) |
+   | `SELF_HOSTS` | 그 밖의 자기 주소, 쉼표 구분 (예: `shorturl.<계정>.workers.dev`) |
 
    `IP=0.0.0.0`은 이미지에 들어 있고, `PORT`는 Railway가 자동으로 넣어 줍니다(지정하지 않으면 8080).
+   Railway가 자동으로 주는 `RAILWAY_PUBLIC_DOMAIN`도 자기 주소로 막습니다.
 4. 배포되면 서버가 시작하면서 마이그레이션을 적용합니다.
 
 DB 비밀번호 등 실제 값은 Railway 환경변수에만 넣고, 저장소·이미지에는 포함하지 않습니다.
@@ -134,11 +149,26 @@ DB 비밀번호 등 실제 값은 Railway 환경변수에만 넣고, 저장소·
 | 요청 | 처리 |
 | --- | --- |
 | `/`, `/assets/*` (index.html, wasm, js, css) | **Workers Static Assets**가 `cloudflare/public/`에서 직접 응답 |
-| `/api/*` | Worker가 Railway로 전달 (메서드·헤더·본문 유지) |
-| `/{숫자}` | Worker가 Railway로 전달, `redirect: "manual"`로 302와 `Location`을 그대로 브라우저에 반환 |
-| 그 밖의 경로 (`/abc` 등) | Railway로 전달해 기존 404 안내 페이지 사용 |
+| `POST /api/links` | IP별 분당 20회 제한 후 Railway로 전달. 초과하면 429 |
+| `GET`·`HEAD /{숫자}` (0으로 시작하지 않는 양수) | Railway로 전달, `redirect: "manual"`로 302와 `Location`을 그대로 반환. 호출 제한 없음 |
+| 그 밖의 모든 요청 | Worker가 직접 404 (백엔드로 보내지 않음) |
 
 정적 파일에 있는 경로는 Cloudflare가 바로 응답하고, 없는 경로만 Worker 코드가 실행됩니다.
+
+**Worker 보안 처리** (`cloudflare/src/index.js`, `cloudflare/src/routing.js`)
+
+- **목적지 고정**: `new URL(BACKEND_URL)`에서 출발해 경로와 쿼리만 바꾸고, 전송 직전에 프로토콜·호스트·포트가
+  `BACKEND_URL`과 같은지 다시 확인합니다. 다르면 502. `//다른호스트/...` 같은 경로로 요청이 밖으로 새지 않습니다.
+- **허용 목록**: 위 표의 두 가지 요청만 백엔드로 보냅니다.
+- **헤더 정리**: `Content-Type`, `Accept`, `Accept-Language`만 새로 만들어 넘깁니다. `Cookie`, `Authorization` 등은 넘기지 않습니다.
+- **공유 비밀 헤더**: 백엔드로 보내는 요청에 `X-Worker-Secret`을 항상 덮어써서 넣습니다. 값은 Cloudflare Secret `WORKER_SECRET`에서만 읽습니다.
+- **호출 제한**: Workers Rate Limiting 바인딩(`CREATE_LIMITER`, `CF-Connecting-IP` 기준 60초에 20회).
+  Cloudflare 위치별 근사치라 정확히 20회에서 끊기지 않을 수 있습니다.
+- **본문 크기**: 생성 요청 본문이 8KB를 넘으면 413.
+
+**백엔드 쪽 확인** (`src/server/auth.rs`): `/api/*`와 `/{숫자}` 요청은 `X-Worker-Secret`이 `WORKER_SECRET`과 같아야 하고(상수 시간 비교),
+다르거나 없으면 403입니다. 그래서 Railway 주소로 직접 호출하면 막힙니다.
+
 Railway 주소는 코드가 아니라 `wrangler.jsonc`의 `vars.BACKEND_URL`에 둡니다.
 
 **웹 화면 빌드 방식**: 풀스택 브라우저 빌드는 서버가 SSR한 HTML을 하이드레이션하도록 되어 있어서,
@@ -163,14 +193,17 @@ Railway 주소는 코드가 아니라 `wrangler.jsonc`의 `vars.BACKEND_URL`에 
    ```
 3. **`wrangler.jsonc`의 `BACKEND_URL`**을 Railway 공개 주소로 맞춥니다.
 4. **로컬 확인(선택)**: `npm run dev` → <http://127.0.0.1:8787>
-5. **배포**:
+5. **비밀 값 등록과 배포**:
    ```bash
    npx wrangler login
+   npx wrangler secret put WORKER_SECRET   # Railway의 WORKER_SECRET과 같은 값 입력
    npm run deploy
    ```
    `https://shorturl.<계정>.workers.dev`로 배포됩니다. 커스텀 도메인은 Cloudflare 대시보드에서 이 Worker에 연결합니다.
 
-비밀 값은 필요하지 않습니다. `BACKEND_URL`은 공개 주소이고, DB 접속 정보는 Railway에만 있습니다.
+비밀 값은 저장소에 넣지 않습니다. `WORKER_SECRET`은 Railway 환경변수와 Cloudflare Secret에만 두고,
+로컬 테스트용 값은 git에 올라가지 않는 `.env`, `cloudflare/.dev.vars`에만 둡니다.
+`BACKEND_URL`은 공개 주소라 설정 파일에 두고, DB 접속 정보는 Railway에만 있습니다.
 
 ## 숫자 발급 방식, 중복 방지, 생성 후 불변
 
@@ -191,6 +224,9 @@ Railway 주소는 코드가 아니라 `wrangler.jsonc`의 `vars.BACKEND_URL`에 
 - `url` 크레이트로 파싱되지 않으면 거부
 - 스킴이 `http`·`https`가 아니면 거부 (`ftp:`, `javascript:`, `mailto:` 등)
 - 호스트가 없으면 거부
+- `https://user:pass@...`처럼 아이디·비밀번호가 들어 있으면 거부
+- 목적지가 이 서비스 자신이면 거부 (`PUBLIC_BASE_URL`의 호스트, `RAILWAY_PUBLIC_DOMAIN`, `SELF_HOSTS`와 그 하위 도메인).
+  파싱한 호스트로 비교하고 대소문자와 끝의 점(`dhurl.link.`)을 맞춘 뒤 비교합니다.
 - 2048바이트를 넘으면 거부
 
 통과한 URL은 표준 형식으로 정규화됩니다(한글 등은 퍼센트 인코딩). **경로·쿼리·프래그먼트(`#...`)는 그대로 유지**되고,
