@@ -2,9 +2,22 @@
 
 ## 배포 URL
 
-- 서비스 URL: (배포 후 기입)
-- 테스트 단축 URL: (배포 후 기입)
-- 테스트 원본 URL: (배포 후 기입)
+- 서비스 URL: https://dhurl.link
+- 테스트 단축 URL: <https://dhurl.link/7>
+- 테스트 원본 URL: https://www.google.com
+
+### 배포 구조
+
+```
+브라우저 → Cloudflare Workers (화면·공개 주소 dhurl.link)
+         → Railway (Rust 백엔드: 생성 API, /숫자 리디렉션)
+         → Railway PostgreSQL
+```
+
+### 비밀 값 관리
+
+DB 비밀번호(`DATABASE_URL`)와 `WORKER_SECRET` 같은 실제 비밀 값은 **Railway 환경변수와 Cloudflare Secret에만** 있고,
+저장소에는 들어 있지 않습니다. 저장소에는 빈 예시 파일(`.env.example`, `cloudflare/.dev.vars.example`)만 있습니다.
 
 ## 소개
 
@@ -281,9 +294,19 @@ RETURNING id;
 
 ## 확인 시나리오 결과와 재현 방법
 
+### 결과 (배포 환경)
+
+| 확인 | 결과 |
+| --- | --- |
+| `GET https://dhurl.link/` | `200`, 생성 화면 |
+| `GET https://dhurl.link/7` | `302`, `Location: https://www.google.com/` |
+| `GET https://dhurl.link/999999999` | `404` |
+| `POST https://dhurl.link/api/links` `{"url":"ftp://x.org"}` | `400` + 안내 문구 |
+| Railway 주소로 직접 `GET /7` (비밀 헤더 없음) | `403` |
+
 ### 결과 (로컬)
 
-로컬(`dx serve` 개발·`--release` 빌드 + Docker PostgreSQL)에서 확인한 결과입니다. 배포 환경 결과는 배포 후 추가합니다.
+로컬(`dx serve` 개발·`--release` 빌드 + Docker PostgreSQL)에서 확인한 결과입니다.
 
 | 시나리오 | 결과 |
 | --- | --- |
@@ -301,27 +324,32 @@ RETURNING id;
 
 ### 재현 방법
 
+`B`는 배포 주소(`https://dhurl.link`) 또는 로컬 Worker(`http://127.0.0.1:8787`)입니다.
+Railway 서버(`:8080`)로 직접 보내면 비밀 헤더가 없어 403이 됩니다.
+
 ```bash
+B=https://dhurl.link
+
 # 생성
-curl -s -X POST http://localhost:8080/api/links \
+curl -s -X POST $B/api/links \
   -H "content-type: application/json" \
   -d '{"url":"https://example.org/a/b?x=1#frag"}'
 
 # 이동 (Location 헤더 확인)
-curl -si http://localhost:8080/1 | head -n 5
+curl -si $B/7 | head -n 5
 
 # 잘못된 URL → 400
-curl -si -X POST http://localhost:8080/api/links \
+curl -si -X POST $B/api/links \
   -H "content-type: application/json" -d '{"url":"ftp://x.org"}'
 
 # 없는 번호 → 404
-curl -si http://localhost:8080/999999 | head -n 1
+curl -si $B/999999999 | head -n 1
 
-# 변경 시도 → 405
-curl -si -X PUT http://localhost:8080/1 -d 'https://evil.example' | head -n 1
+# 변경 시도 → Worker는 404(백엔드로 보내지 않음), 로컬 백엔드에 비밀 헤더와 함께 보내면 405
+curl -si -X PUT $B/7 -d 'https://evil.example' | head -n 1
 
-# 동시 생성 20개 → id가 모두 달라야 함
-for i in $(seq 1 20); do curl -s -X POST http://localhost:8080/api/links \
+# 동시 생성 20개 → id가 모두 달라야 함 (배포 환경은 IP당 분당 20회 제한)
+for i in $(seq 1 20); do curl -s -X POST $B/api/links \
   -H "content-type: application/json" -d "{\"url\":\"https://example.com/c$i\"}" & done; wait
 
 # DB 직접 변경 시도 → 트리거 오류
