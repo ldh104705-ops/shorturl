@@ -169,7 +169,8 @@ DB 비밀번호 등 실제 값은 Railway 환경변수에만 넣고, 저장소·
 **백엔드 쪽 확인** (`src/server/auth.rs`): 생성 API와 `/{code}` 라우트는 `X-Worker-Secret`이 `WORKER_SECRET`과 같아야 하고(상수 시간 비교),
 다르거나 없으면 403입니다. 그래서 Railway 주소로 직접 호출하면 막힙니다.
 검사는 경로 문자열 모양으로 판단하지 않고 라우트 자체에 붙어 있습니다
-(`/{code}`는 `route_layer`, `/api/links`는 서버 함수 본문 맨 앞). `/%31`처럼 인코딩된 경로도 똑같이 검사됩니다.
+(`/{code}`는 `route_layer`, `/api/links`는 라우터가 매칭한 라우트(`MatchedPath`)를 보고 **본문을 해석하기 전에** 검사하는 미들웨어와
+서버 함수 본문 맨 앞의 검사 두 겹). `/%31`처럼 인코딩된 경로나 잘못된 본문도 비밀이 없으면 403입니다.
 
 Railway 주소는 코드가 아니라 `wrangler.jsonc`의 `vars.BACKEND_URL`에 둡니다.
 

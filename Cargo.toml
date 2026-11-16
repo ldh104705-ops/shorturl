@@ -17,6 +17,8 @@ tokio = { version = "1", features = ["full"], optional = true }
 dotenvy = { version = "0.15", optional = true }
 anyhow = { version = "1", optional = true }
 subtle = { version = "2.6", optional = true }
+# Dioxus가 쓰는 axum과 같은 버전. 미들웨어에서 매칭된 라우트(MatchedPath)를 보려고 이 기능만 켠다.
+axum = { version = "0.8.4", default-features = false, features = ["matched-path"], optional = true }
 sqlx = { version = "0.8.6", default-features = false, features = [
     "runtime-tokio",
     "postgres",
@@ -43,6 +45,7 @@ server = [
     "dep:dotenvy",
     "dep:anyhow",
     "dep:subtle",
+    "dep:axum",
     "dep:sqlx",
 ]
 # 클라이언트 전용 브라우저 빌드: 하이드레이션 없이 빈 index.html에서 바로 그린다.

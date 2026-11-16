@@ -24,9 +24,16 @@ fn main() {
         server::validate::init_self_hosts(); // 자기 서비스 주소 목록(단축 대상에서 제외)
         server::db::init().await?; // DB 연결 + 마이그레이션(테이블 생성)
 
-        // 비밀 헤더 검사는 각 라우트에 직접 붙어 있다:
+        use dioxus::server::axum::middleware::from_fn_with_state;
+        use server::auth::require_secret_on_api_routes;
+
+        // 비밀 헤더 검사는 라우트 기준으로 붙어 있다:
         // - /{code}     : redirect::router의 route_layer
-        // - /api/links  : api::create_link 함수 본문 맨 앞
-        Ok(dioxus::server::router(app::App).merge(server::redirect::router(secret)))
+        // - /api/links  : 매칭된 라우트를 보고 본문 해석 전에 검사하는 layer + 서버 함수 본문 맨 앞
+        let app_routes = dioxus::server::router(app::App).layer(from_fn_with_state(
+            secret.clone(),
+            require_secret_on_api_routes,
+        ));
+        Ok(app_routes.merge(server::redirect::router(secret)))
     });
 }

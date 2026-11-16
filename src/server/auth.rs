@@ -7,10 +7,13 @@
 //! 검사는 경로 문자열 모양(숫자인지 등)으로 판단하지 않고, 라우트 자체에 붙인다.
 //! - `/{code}` 리디렉션: `redirect::router`가 `route_layer`로 이 미들웨어를 붙인다.
 //!   `/%31`처럼 인코딩된 경로도 같은 라우트에 매칭되므로 항상 검사된다.
-//! - `/api/links` 서버 함수: 함수 본문 맨 앞에서 `request_is_from_worker`로 검사한다.
+//! - `/api/links` 서버 함수: 두 겹으로 검사한다.
+//!   1. `require_secret_on_api_routes` 미들웨어가 **본문을 해석하기 전에** 매칭된 라우트
+//!      (`MatchedPath`)를 보고 검사한다. 원문 경로 문자열이 아니라 라우터가 고른 라우트 패턴으로 판단한다.
+//!   2. 서버 함수 본문 맨 앞에서 `request_is_from_worker`로 한 번 더 검사한다.
 
 use dioxus::server::axum::{
-    extract::{Request, State},
+    extract::{MatchedPath, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -63,9 +66,34 @@ pub async fn require_worker_secret(
     next: Next,
 ) -> Response {
     if !headers_match(req.headers(), &secret) {
-        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+        return forbidden();
     }
     next.run(req).await
+}
+
+/// 비밀 헤더가 필요한 서버 함수 라우트 (라우터에 등록된 패턴 그대로)
+pub const PROTECTED_API_ROUTES: &[&str] = &["/api/links"];
+
+/// axum 미들웨어: Dioxus 라우터 전체에 `layer`로 붙인다.
+/// 라우터가 이 요청을 `PROTECTED_API_ROUTES`의 라우트로 매칭했으면, 핸들러가 본문을 읽기 전에 검사한다.
+/// (`MatchedPath`는 라우터가 고른 패턴이라 `/api/%6Cinks` 같은 표기로는 바뀌지 않는다.)
+pub async fn require_secret_on_api_routes(
+    State(secret): State<Arc<str>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let protected = req
+        .extensions()
+        .get::<MatchedPath>()
+        .is_some_and(|m| PROTECTED_API_ROUTES.contains(&m.as_str()));
+    if protected && !headers_match(req.headers(), &secret) {
+        return forbidden();
+    }
+    next.run(req).await
+}
+
+fn forbidden() -> Response {
+    (StatusCode::FORBIDDEN, "Forbidden").into_response()
 }
 
 #[cfg(test)]
@@ -148,5 +176,73 @@ mod tests {
             }
         }
         assert_eq!(status("GET", "/", None).await, StatusCode::OK);
+    }
+
+    /// Dioxus 라우터와 같은 모양: 서버 함수 라우트는 핸들러에서 본문을 해석하고, 실패하면 500.
+    fn api_app() -> Router {
+        use dioxus::server::axum::routing::post;
+        Router::new()
+            .route(
+                "/api/links",
+                post(|body: String| async move {
+                    if body.starts_with('{') {
+                        (StatusCode::OK, "created")
+                    } else {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "error deserializing")
+                    }
+                }),
+            )
+            .route("/", get(|| async { "home" }))
+            .layer(from_fn_with_state(
+                Arc::<str>::from("s3cret"),
+                require_secret_on_api_routes,
+            ))
+    }
+
+    async fn api_status(method: &str, path: &str, secret: Option<&str>, body: &str) -> StatusCode {
+        let mut req = Request::builder().method(method).uri(path);
+        if let Some(s) = secret {
+            req = req.header("X-Worker-Secret", s);
+        }
+        api_app()
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn api_route_checks_secret_before_body_parsing() {
+        // 비밀이 없거나 틀리면 본문이 잘못돼도(해석 전에) 403
+        for secret in [None, Some("wrong")] {
+            for body in [
+                "xxxx",
+                "url=https://example.org",
+                "",
+                r#"{"url":"https://example.org"}"#,
+            ] {
+                assert_eq!(
+                    api_status("POST", "/api/links", secret, body).await,
+                    StatusCode::FORBIDDEN,
+                    "{secret:?} {body:?}"
+                );
+            }
+        }
+        // 비밀이 맞으면 핸들러까지 간다
+        assert_eq!(
+            api_status("POST", "/api/links", Some("s3cret"), r#"{"url":"x"}"#).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            api_status("POST", "/api/links", Some("s3cret"), "xxxx").await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        // 보호 대상이 아닌 라우트는 그대로
+        assert_eq!(api_status("GET", "/", None, "").await, StatusCode::OK);
+        // 다른 표기는 이 라우트에 매칭되지 않으므로 핸들러에 닿지 않는다
+        for path in ["/api/%6Cinks", "/API/links", "/api/links/"] {
+            let s = api_status("POST", path, None, r#"{"url":"x"}"#).await;
+            assert!(s != StatusCode::OK, "{path} → {s}");
+        }
     }
 }
